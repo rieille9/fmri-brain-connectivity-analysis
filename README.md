@@ -6,6 +6,9 @@ The objective was to analyze functional connectivity patterns across 90 subjects
 
 The project was completed as part of a multivariate statistics and machine learning research project.
 
+## Full Interactive Report
+
+👉 https://rieille9.github.io/fmri-brain-connectivity-analysis/
 ---
 
 ## Project Objectives
@@ -96,6 +99,3 @@ Due to dataset restrictions, the raw data is not publicly available in this repo
 * Extracted recurring co-activation patterns (CAPs)
 * Analyzed temporal dynamics of resting-state brain activity
 * Explored demographic differences through permutation testing
-
-
-
