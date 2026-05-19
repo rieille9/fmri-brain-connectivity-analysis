@@ -97,11 +97,5 @@ Due to dataset restrictions, the raw data is not publicly available in this repo
 * Analyzed temporal dynamics of resting-state brain activity
 * Explored demographic differences through permutation testing
 
----
 
 
-## Full Interactive Report
-
-The complete interactive analysis report can be viewed here:
-
-👉 [Open HTML Report](https://yourusername.github.io/fmri-brain-connectivity-analysis/)
