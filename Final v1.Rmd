@@ -1,6 +1,6 @@
 ---
 title: "MVA Project"
-author: "Haozhe Li (24329435), Rachel Rieille (19317932), Zihan Liu (24327033), Jonathan Edwards (00307462)"
+author: "Haozhe Li, Rachel Rieille, Zihan Liu, Jonathan Edwards"
 date: "`r Sys.Date()`"
 format:
   html:
