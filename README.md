@@ -100,9 +100,8 @@ Due to dataset restrictions, the raw data is not publicly available in this repo
 ---
 
 
-## Authors
+## Full Interactive Report
 
-* Rachel Rieille
-* Haozhe Li
-* Zihan Liu
-* Jonathan Edwards
+The complete interactive analysis report can be viewed here:
+
+👉 [Open HTML Report](https://yourusername.github.io/fmri-brain-connectivity-analysis/)
