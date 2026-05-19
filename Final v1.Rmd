@@ -1,0 +1,1988 @@
+---
+title: "MVA Project"
+author: "Haozhe Li (24329435), Rachel Rieille (19317932), Zihan Liu (24327033), Jonathan Edwards (00307462)"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    fontsize: 11pt
+    smooth-scroll: true
+    code-fold: true
+    code-tools: true
+    page-layout: full
+theme:
+  light: flatly
+execute: 
+  warning: false
+  message: FALSE
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, message = F, warning = F)
+set.seed(123)  # Ensure reproducibility
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gridExtra) #provides multiplotting functionality for ggplot
+library(GGally)
+library(grid) # textGrob...
+library(pheatmap)
+library(reshape2)
+library(rstudioapi) 
+library(ggseg)
+library(ggseg3d)
+library(ggsegSchaefer)
+library(tibble)
+```
+
+```{r cleardata, include=FALSE}
+rm(list=ls()) # clear the data
+```
+
+```{r echo=F}
+load("subjects-fMRI.RData")
+```
+
+# 0. AI Disclaimer
+
+We have used AI tools such as chatGPT to assist with coding.
+
+We also asked some questions around:
+
+-   how to perform analysis relating to fMRI data:
+    <https://chatgpt.com/share/67c8aef0-4184-8001-bf31-87335fef0c83>
+-   PCA with more features than observations::
+    <https://chatgpt.com/share/67f633b9-73fc-8001-9561-8ed44183c7ab>
+
+# 1. Explanatory Data Analysis
+
+## Data structure
+
+```{r echo=FALSE}
+cat("Structure of roi.names:\n")
+str(roi.names)
+cat("\n")
+cat("Structure of subj.x:\n")
+str(subj.x)
+cat("\n")
+cat("Preview of the first subject's fMRI data:\n")
+str(subj.fmri[[1]])
+```
+
+Number of subject : `r length(subj.fmri)`
+
+The dataset includes:
+
+-   roi.names: A list with 100 brain region names.
+
+-   subj.x: A tibble with 90 rows and 2 columns:
+
+    -   gender (Factor with 2 levels: “F”, “M”)
+
+    -   age (Factor with 4 levels, e.g., “22-25”, “26-30”)
+
+-   subj.fmri: A list of 90 matrices corresponding to 90 subjects (we
+    only show 10), where each a matrix of dimension $100 \times T_i$
+    corresponds a subject's activation measurement for all 100 regions
+    at different time points, $T_i$ varies per subject but is of the
+    order of 1000.
+
+## Age and gender
+
+```{r}
+# Summary of covariates
+g1 = ggplot(subj.x , aes(x=subj.x$gender)) +  
+  geom_bar(position = "dodge") +
+  xlab("Gender")
+
+g2 = ggplot(subj.x , aes(x=subj.x$age)) +  
+  geom_bar(position = "dodge") +
+  xlab("Age")
+
+grid.arrange(g1,g2,ncol=2)
+
+```
+
+The data is balanced in gender but imbalanced in age. Namely we have
+only one subject older than 35
+
+```{r}
+any(is.na(subj.fmri))
+```
+
+There are no missing values.
+
+## Time behaviour of the data
+
+In order to get a better idea of the time behaviour of the data. Here we
+look at one subject (subject 5) and illustrate the time behaviour of 3
+regions of interest (ROI).
+
+```{r}
+selected_rois <- c(1,5,10)  
+
+
+sub5 <- t(subj.fmri[[5]])  
+df_sub5 <- data.frame(sub5)
+
+df_sub5 <- df_sub5 %>%
+  mutate(Time = 1:nrow(df_sub5))
+
+selected_roi_names <- roi.names[selected_rois]
+
+# change column names
+names(df_sub5)[selected_rois] <- selected_roi_names
+
+df_long <- df_sub5 %>%
+  dplyr::select(all_of(c("Time", selected_roi_names))) %>%
+  pivot_longer(cols = -Time, names_to = "Variable", values_to = "Value")
+
+p <- ggplot(df_long, aes(x = Time, y = Value, color = Variable)) +
+  geom_line() +
+  facet_wrap(~ Variable, nrow = 3, scales = "free_y") +
+  theme_minimal() +  
+  labs(title = "Time Series of Selected ROIs",
+       x = "Time",
+       y = "BOLD Signal") +
+  theme(legend.position = "none") 
+
+print(p)
+```
+
+The three ROIs for subject 5 appear to have a zero mean and stable
+variance, suggesting stationarity. There is no obvious trend or
+seasonality.
+
+## Mean and standard deviation
+
+```{r}
+# initial dataframe for mean and sd
+summary_df <- data.frame()
+
+# calculate mean and sd
+for (i in seq_along(subj.fmri)) {  
+  for (roi in 1:nrow(subj.fmri[[i]])) {  
+    roi_data <- as.vector(subj.fmri[[i]][roi, ])
+    mean_value <- mean(roi_data, na.rm = TRUE)  
+    sd_value <- sd(roi_data, na.rm = TRUE)      
+    
+    #save data
+    temp_df <- data.frame(
+      Subject = paste("Subject", i),
+      ROI = paste("ROI", roi),
+      Mean = mean_value,
+      SD = sd_value
+    )
+    
+    summary_df <- rbind(summary_df, temp_df)
+  }
+}
+summary(summary_df)
+```
+
+All data by subject and region have a means and variances close to 0 and
+1 respectively, with only very small differences. It is possible that
+the data has been previously standardized.
+
+```{r}
+
+# choose subjects and rois
+selected_subjects <- c(1, 5, 10)
+selected_rois <- c(1, 3, 5)       
+# selected_roi_names <- roi.names[selected_rois]
+
+# initial empty dataframe
+hist_data <- data.frame()
+
+# iterate subjects and ROIs
+for (i in selected_subjects) {
+  for (roi in selected_rois) {
+    roi_data <- as.vector(subj.fmri[[i]][roi, ])  # roi from subject i
+    temp_df <- data.frame(
+      Value = roi_data,
+      Subject = paste("Subject", i),
+      # ROI = paste("ROI", roi)
+      ROI = roi.names[roi]
+    )
+    hist_data <- rbind(hist_data, temp_df)  
+  }
+}
+
+
+# plot histogram
+ggplot(hist_data, aes(x = Value, fill = Subject)) +
+  geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+  theme_minimal() +
+  labs(title = "Distribution of Selected Subjects and ROIs",
+       x = "Value", y = "Count") +
+  scale_fill_manual(values = c("blue", "red", "green")) +
+  facet_wrap(~ Subject + ROI, scales = "free")
+
+```
+
+These plots show the distribution of fMRI values for selected subjects
+(1, 5, 10) and ROIs (1, 3, 5). -The histograms seem to indicate that the
+data is approximately normally distributed, centered around zero. -The
+variance appears similar across different subjects and ROIs, though some
+distributions show slight asymmetry or heavier tails. -Differences
+between subjects and ROIs could suggest individual or regional
+variations in brain activity.
+
+We will check the normality of the distributions more formally using
+Shapiro-Wilk Normality Test.
+
+```{r}
+# Shapiro-Wilk Normality Test
+suppressWarnings({
+  
+  results <- data.frame(
+  Subject = NULL,
+  Failed = NULL
+    )
+  all_stationary <- TRUE
+
+  for (i in 1:90) {
+    subject_normal <- TRUE  # set subject normal status
+    failed = 0
+    passed = 0
+
+    for (j in 1:100) {
+      ts <- subj.fmri[[i]][j,]  # get j region data from subject i
+
+      if (shapiro.test(ts)$p.value < 0.05) {
+        # cat(paste("Variable", j, "is not normal in Subject", i, "\n"))
+        subject_normal <- FALSE  # This subject is not normal
+        all_normal <- FALSE  # At least one subject not normal
+        failed = failed + 1
+      }
+      else{passed = passed + 1}
+    }
+    
+    results[i,"Subject"] = i
+    results[i,"Failed"] = failed
+
+  }
+
+})
+
+head(results[order(results$Failed,decreasing = F),])
+```
+
+We find that in fact most of the distributions are not normally
+distributed.
+
+Based on the above EDA, we assume:
+
+1.  Stationarity of the ROI time series for all subjects
+2.  We cannot assume normality
+
+# 2. PCA on a Single Subject (Subject 5)
+
+For PCA on a single subject we performed PCA partly "by hand" without
+using the prcomp function
+
+## Data preparation and centering
+
+To proceed with PCA on a single subject, we start by centering the data
+to focus the PCA on the temporal fluctuations of each ROI around its
+mean. This ensures that the variance analyzed reflects the dynamic
+relationships between ROIs (their co-variations), rather than
+differences in mean activity levels.
+
+```{r pca-single-subject}
+
+# Select subject j = 5
+
+subject_index <- 5
+
+subj_5_data <- subj.fmri[[subject_index]]  # 100 x T matrix
+
+X <- t(subj_5_data)
+
+# Center the data (important step in PCA)
+
+X_centered <- scale(X, center = TRUE, scale = FALSE)  # Centered but not scaled
+
+```
+
+## Compute covariance matrix and PCA by hand
+
+```{r pca-computation}
+
+# Compute sample covariance matrix (between ROIs)
+
+n <- nrow(X_centered)
+
+S <- t(X_centered) %*% X_centered / (n - 1)  # 100 x 100 covariance matrix
+
+# Eigen decomposition (PCA)
+
+eigen_decomp <- eigen(S)
+
+eigenvalues <- eigen_decomp$values  # Variance explained by each PC
+
+eigenvectors <- eigen_decomp$vectors  # PC loadings
+
+# Principal component scores (projection onto PCs)
+
+PC_scores <- X_centered %*% eigenvectors  # T x 100 matrix
+
+```
+
+We check if we get the same results as with function prcomp
+
+```{r}
+pca_X = prcomp(X)
+all.equal(eigenvalues,pca_X$sdev^2)
+```
+
+## Variance explained and selection of PCs
+
+```{r pca-variance}
+
+# Variance explained by each PC
+
+variance_explained <- eigenvalues / sum(eigenvalues) * 100  # Percentage
+
+cumulative_variance <- cumsum(variance_explained)
+
+# number of loadings to explain 90% of variance
+
+num_pcs_90 <- which(cumulative_variance >= 90)[1]
+
+cat("\nNumber of PCs needed to explain at least 90% variance:", num_pcs_90,"\n")
+
+# Output variance explained
+
+cat("Variance explained by first 13 PCs (%):\n", round(variance_explained[1:13], 2))
+
+cat("\nCumulative variance explained by first 13 PCs (%):\n", round(cumulative_variance[1:13], 2))
+
+# Comment: First few PCs typically capture the majority of variance, indicating dominant patterns of brain activity.
+
+# Number of PCs needed for 90% variance
+
+```
+
+## PC Scores visualization (Temporal dynamics)
+
+Here we look at the behaviour of the PC scores on the first two PC
+loadings in time
+
+```{r}
+data = data.frame(PC_scores)
+colnames(data) = gsub("X","PC",colnames(data))
+time = seq(1:nrow(data))
+
+
+g = ggplot(data, aes(x=PC1, y=PC2, color=time)) +
+geom_point(size=2) +
+geom_path() +
+scale_colour_gradient(low="purple", high="yellow")+
+ggtitle("PC1 vs PC2 scores over all time")
+
+print(g)
+```
+
+The plot shows how the brain activity of one subject evolves over time,
+using the first two principal components (PC1 and PC2) from PCA. Each
+point is a time step, colored from purple to yellow, and connected to
+show the sequence. We can see that the activity moves smoothly through
+space, forming loops and curves, which means the brain is not static but
+changes over time in a structured way. This helps to visualize the
+overall dynamics in a reduced 2D space.
+
+## Brain plots of PC Loadings
+
+```{r include=FALSE}
+# plot functions ----------------------------------------------------------
+
+brain_plot <- function(y, roiNames, myTitle=NULL){
+  df <- tibble(
+    # build the dataset
+    region = roi.names, 
+    y = y,
+    hemi = rep(c("left", "right"), each = 50)
+  )
+  
+  # ggplot object
+  p = df %>%
+    ggplot() +
+    geom_brain(atlas = schaefer7_100,                                                              # type of atlas: Schaefer100
+               position = position_brain(side ~ hemi),                                             # *hemi* is in {right, left};  *side* is in {lateral, medial}
+               aes(fill = y)) +
+    scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +                # color scale to fill the ROIs
+    xlab("hemisphere") +                                                                           # label on the x-axis
+    ylab("side") +                                                                                 # label on the y-axis 
+    annotate("text", x = -30, y = 100, label = "Lateral", size = 4, hjust = 0, angle = 90) +       # labels of *side* (for easier interpretation)
+    annotate("text", x = -30, y = 350, label = "Medial", size = 4, hjust = 0, angle = 90) +        
+    annotate("text", x = 150, y = -30, label = "Left", size = 4, hjust = 0) +                      # labels of *hemi* (for easier interpretation)
+    annotate("text", x = 500, y = -30, label = "Right", size = 4, hjust = 0) +
+    ggtitle(myTitle) +                                                                             # title
+    theme_minimal() +                                                                              
+    theme(axis.text.x = element_blank(),                                                           # remove axis text
+                  axis.text.y = element_blank(),
+                  axis.ticks.x = element_blank(),
+                  axis.ticks.y = element_blank())
+  
+  return(p)
+}
+
+```
+
+::: {.panel-tabset}
+### PC 1
+```{r }
+
+# Plot loadings for first 5 PCs
+
+  p <- brain_plot(eigenvectors[, 1], roi.names, paste("Loadings of PC", 1, "(Subject 5)"))
+print(p)
+```
+### PC 2
+```{r}
+
+# Plot loadings for first 5 PCs
+
+  p <- brain_plot(eigenvectors[, 2], roi.names, paste("Loadings of PC", 2, "(Subject 5)"))
+print(p)
+```
+### PC 3
+```{r }
+
+# Plot loadings for first 5 PCs
+
+  p <- brain_plot(eigenvectors[, 3], roi.names, paste("Loadings of PC", 3, "(Subject 5)"))
+print(p)
+```
+### PC 4
+```{r }
+
+# Plot loadings for first 5 PCs
+
+  p <- brain_plot(eigenvectors[, 4], roi.names, paste("Loadings of PC", 4, "(Subject 5)"))
+print(p)
+
+```
+### PC 5
+```{r }
+
+# Plot loadings for first 5 PCs
+
+  p <- brain_plot(eigenvectors[, 5], roi.names, paste("Loadings of PC", 5, "(Subject 5)"))
+  print(p)
+```
+:::
+
+These maps show which brain regions contribute most to each principal
+component. Red regions are positively associated; blue are negatively
+associated.
+
+The first PC loading corresponds to an average response, where all brain
+regions are activated.
+
+## Interpretation of Results MODIFIED
+
+-   **Variance Explained**: The first PC explains approximately
+    `r round(variance_explained[1], 2)`% of the total variance. The
+    first `r num_pcs_90` PCs out of a 100 together explain at least 90%,
+    showing that a few components summarize most brain dynamics.
+
+-   **PC Loadings**: The brain maps show that:
+
+    -   **PC1** indicates a global co-activation pattern
+
+    -   **PC2** reveals an opposition between frontal and posterior
+        regions, potentially reflecting antagonism between attention and
+        resting-state networks.
+
+    -   **PC3 to PC5** suggest more specific localized activations.
+
+-   **PC Scores**: Temporal analysis of PC scores indicates when these
+    brain patterns are active or suppressed during scanning,
+    highlighting brain network dynamics. There is no obvious pattern in
+    time that can be observed from this analysis.
+
+# 3. Multiple Subject PCA
+
+## Challenges, issues and possible solutions
+
+PCA is applied to a $n \times p$ **2D-matrix** where $n$ is the number
+of observations and $p$ the number of features.
+
+In our situation, we have for every subject $i$ a corresponding
+$T_i \times p$ matrix where $T_i$ is the number of observations for
+subject $i$ ranging between 1100 and 1200 and $p$ is 100 corresponding
+to the total number of ROIs, therefore our whole data is a vector of
+matrices:
+
+-   $p$ corresponds to the 100 ROIs
+
+-   $m$ corresponds to the 90 subjects
+
+-   $T_i$ for $i=1,...,m$ ranging between 1100 and 1200
+
+The challenge is how do we transform this vector of matrices into a
+2D-matrix, so we can apply PCA. There are different ways of doing this
+and therefore choices need to be made and justified.
+
+A first approach, might be to try and keep all the information. This
+requires that our vector of matrices be in fact a $T\times p \times m$
+**3D-matrix** where $T$ is the same for all subjects, meaning we need to
+make $T_i$ the same each subject:
+
+1.  Combine the Subject and ROI dimensions to obtain a $T \times mp$
+    2D-matrix having $mp$ variables and $T$ observations
+2.  Combine the Subject and time dimensions to obtain a $p \times mT$
+    2D-matrix having $mT$ variables and $p$ observations.
+3.  Combine the time and ROI dimensions to obtain a $m\times pT$
+    2D-matrix having $pT$ variables and $m$ observations
+
+A first problem is if we make all $T_i = T$ where $T=min(T_i)$ then a
+choice has to be made as to which observations to keep for any subject
+with $T_i>T$. If we have $T=max(T_i)$ then we will have missing values
+for all subjects with $T_i<T$ .
+
+A second problem is that the number of variables becomes unwieldy, much
+bigger than the number of observations which will lead to overfitting
+where the PC loadings might reflect noise rather than true relationships
+and becomes meaningless (see chatgpt discussion:
+<https://chatgpt.com/share/67f633b9-73fc-8001-9561-8ed44183c7ab> )
+
+A second approach in order to avoid these problems, requires that we
+collapse one of the 3 matrix dimensions in some way. We want to keep the
+ROI dimension, so we are left with collapsing the subject or time
+dimensions, here again there are different ways of doing this, which
+allow us to keep more or less information. We have here a classic
+bias-variance trade-off where keeping more information leads to higher
+variance but lower bias and keeping less information leads to higher
+bias and lower variance.
+
+1.  Appending time data from all subjects to obtain a
+    $\sum_{i=1}^{90}T_i \times p$ matrix having $p = 100$ variables
+    -   **Advantage**: If we are interested in analysing fundamental
+        brain modes this might be a valid approach
+
+    -   **Disadvantage**: we lose all information pertaining to
+        subjects, meaning our analysis won't tell us about potential
+        differences in brain activity for different demographics.
+2.  Create a summary statistic (time average) for each ROI and each
+
+    subject to obtain a $m\times p$ 2D-matrix:
+    -   **Advantage**: this is a simple, low variance approach.
+        Observations and variables are of the same order, so we don't
+        suffer from the problem of having too many variables
+    -   **Disadvantage**: Probably overkill as we lose all the time
+        information and within subject association between brain regions information. This approach is most likely too biased.
+
+3.  Compute a $p\times p$ correlation matrix for each subject, and
+    retain - because the matrix is symmetric - only the upper triangle
+    of this matrix to obtain a $m\times \frac{p(p-1)}{2}$ 2D-matrix.
+    This is a higher variance, lower bias approach than in the preceding
+    point.
+    -   **Advantage**: this retains the information about association
+        between brain regions for each subject
+
+    -   **Disadvantage**: might potentially still produce overfitting
+        given that we have 4950 variables for 90 observations. We will
+        address this issue when doing this approach.
+4.  VAR approach where instead of building a correlation matrix for each
+    subject, we fit a VAR(1) model for each subject:
+    $Y_{it} = A_iY_{it-1}+\epsilon_{it}$ and build our $m\times p^2$
+    2D-matrix using $A_i$ . Note that $A_i$ is a $p\times p$ matrix
+    because we allow for an intercept in the VAR model and that it is
+    not symmetric.
+    -   **Advantage**: Here we retain even more time information than in
+        the previous approach with the correlation matrix
+
+    -   **Disadvantage**: The first potential issue here is with the
+        model assumption that we have a VAR(1) model, the second issue
+        is that our 2D-matrix is a 90 by 10000 matrix. The ratio of
+        variables to observations is even bigger which may lead to a
+        meaningless PCA due to overfitting.
+
+In this section, we present both the correlation approach (3.) and the
+VAR approach (4.)
+
+
+
+## 3.1 Correlation approach
+
+### Full
+
+In the following code, we computed a 100 × 100 correlation matrix per
+subject, capturing the standardized association between each pair of
+ROIs. Then, we extracted the upper triangle of the correlation matrix of
+each subject.
+
+We will then be able to apply PCA on the stacked matrix of dimension 90
+x 4950
+
+```{r}
+
+# Function to compute covariance matrix and extract upper triangle
+
+extract_lower_triangle <- function(matrix) {
+
+  cor_matrix <- cor(t(matrix))  # Compute covariance (100 x 100)
+
+  lower_tri <- cor_matrix[lower.tri(cor_matrix)]  # Extract lower triangle
+
+  return(lower_tri)
+
+}
+
+# Compute upper triangle covariance for all subjects
+
+cor_vectors <- lapply(subj.fmri, extract_lower_triangle)
+
+# Convert list to matrix (90 subjects x 4950 features)
+
+cor_matrix_all <- do.call(rbind, cor_vectors)
+
+pca_cov_full <-  prcomp(cor_matrix_all)
+
+variance_explained <- pca_cov_full$sdev^2 / sum(pca_cov_full$sdev^2) * 100  # Percentage
+
+cumulative_variance <- cumsum(variance_explained)
+
+# Output variance explained
+
+cat("Variance explained by first 10 PCs (%):\n", round(variance_explained[1:10], 2))
+
+cat("\nCumulative variance explained by first 10 PCs (%):\n", round(cumulative_variance[1:10], 2))
+
+# Number of PCs needed for 90% variance
+
+num_pcs_90 <- which(cumulative_variance >= 90)[1]
+
+cat("\nNumber of PCs needed to explain at least 90% variance:", num_pcs_90)
+
+```
+
+Each row of the 90x4950 2D-matrix is a pairwise functional connectivity
+(ROI-ROI correlation).
+
+As explained above, we probably still have overfitting in this case
+because we have 4950 features but only 90 subjects. This makes PCA
+unstable, as PCA assumes enough observations.
+
+### Reduced
+
+In the following, we reduce the number of variables by computing
+$Y_{ik} = \frac{1}{N - 1} \sum_{\substack{l = 1 \ l \ne k}}^{N} \left| \text{Cor}(X_{ik}, X_{il}) \right|$
+for each subject $i$ and for each ROI $k$ .
+
+This resulted in a 90 × 100 matrix, where each entry reflects how
+strongly a given ROI is functionally coupled to the rest of the brain in
+a specific subject. These features were standardized across subjects and
+used for further PCA and clustering analyses.
+
+```{r}
+
+roi_features <- matrix(0, 90, 100)
+
+roi_pairs <- which(lower.tri(matrix(0, 100, 100)), arr.ind = TRUE) # create a matrix that indicates of length 4950, and two column indicating the ROI numbers so that we know  what column in the cor_matrix_all corresponds to which ROIs correlation
+
+for (subject in 1:nrow(cor_matrix_all)) {
+
+    subject_correlation <- cor_matrix_all[subject, ] # take each subject row
+
+    roi_contributions <- numeric(100) #create a list full of 0 of length 100
+
+    roi_counts <- numeric(100)   #create a list full of 0 of length 100
+
+    for (i in seq_along(subject_correlation)) {
+
+      roi1 <- roi_pairs[i, 2]
+
+      roi2 <- roi_pairs[i, 1] # we inverse because we had the lower triangle
+
+      roi_contributions[roi1] <- roi_contributions[roi1] + abs(subject_correlation[i])
+
+      roi_contributions[roi2] <- roi_contributions[roi2] + abs(subject_correlation[i])
+
+      # print(roi_contributions[roi1])
+
+      roi_counts[roi1] <- roi_counts[roi1] + 1
+
+      roi_counts[roi2] <- roi_counts[roi2] + 1
+
+    }
+
+    roi_features[subject, ] <- roi_contributions / roi_counts # Computes average connectivity per ROI
+
+  }
+
+normalized_features <- scale(roi_features)  # Standardize across subjects
+
+```
+
+```{r echo=FALSE}
+
+pca_result_corr <- prcomp(normalized_features, center = TRUE, scale. = TRUE)
+
+variance_explained <- pca_result_corr$sdev^2 / sum(pca_result_corr$sdev^2) * 100  # Percentage
+
+cumulative_variance <- cumsum(variance_explained)
+
+# Number of PCs needed for 90% variance
+
+num_pcs_90 <- which(cumulative_variance >= 90)[1]
+
+cat("\nNumber of PCs needed to explain at least 90% variance:", num_pcs_90,"\n")
+
+# Output variance explained
+
+cat("Variance explained by first 10 PCs (%):\n", round(variance_explained[1:10], 2))
+
+cat("\nCumulative variance explained by first 10 PCs (%):\n", round(cumulative_variance[1:10], 2))
+
+
+
+```
+
+Now only 6 PC loadings capture the majority of variance, indicating
+dominant patterns of brain activity.
+
+::: {.panel-tabset}
+### PC 1
+```{r }
+
+# Plot loadings for first 5 PCs
+
+  p <- brain_plot(pca_result_corr$rotation[, 1], roi.names, paste("Loadings of PC", 1, "for all subject"))
+print(p)
+```
+### PC 2
+```{r }
+
+# Plot loadings for first 5 PCs
+
+  p <- brain_plot(pca_result_corr$rotation[, 2], roi.names, paste("Loadings of PC", 2, "for all subject"))
+print(p)
+```
+### PC 3
+```{r }
+
+# Plot loadings for first 5 PCs
+
+  p <- brain_plot(pca_result_corr$rotation[, 3], roi.names, paste("Loadings of PC", 3, "for all subject"))
+print(p)
+```
+### PC 4
+```{r }
+
+# Plot loadings for first 5 PCs
+
+  p <- brain_plot(pca_result_corr$rotation[, 4], roi.names, paste("Loadings of PC", 4, "for all subject"))
+
+print(p)
+
+```
+### PC 5
+```{r }
+
+# Plot loadings for first 5 PCs
+
+  p <- brain_plot(pca_result_corr$rotation[, 5], roi.names, paste("Loadings of PC", 5, "for all subject"))
+print(p)
+```
+:::
+
+We observe similar patterns for the PC loadings for all subjects using PCA on the mean activation matrix as in the case with a single subject that we perfromed in section 2.
+
+```{r}
+# Build data frame with PCA scores + age + gender
+
+df_pca_corr <- data.frame(
+
+  PC1 = pca_result_corr$x[, 1],
+
+  PC2 = pca_result_corr$x[, 2],
+
+  PC3 = pca_result_corr$x[, 3],
+
+  PC4 = pca_result_corr$x[, 4],
+
+  PC5 = pca_result_corr$x[, 5],
+
+  PC6 = pca_result_corr$x[, 6],
+
+  age = as.factor(subj.x$age),
+
+  gender = as.factor(subj.x$gender)
+
+)
+```
+
+## 3.2 VAR approach
+### Full
+```{r}
+# var model function
+fit_var1 <- function(Y) {
+  #Y is a mrtrix with T*K
+  Y <- as.matrix(Y)
+  T <- nrow(Y)
+  k <- ncol(Y)
+  
+ #responsed variable
+  Y_response <- Y[2:T, ]
+  
+  
+  intercept <- rep(1, T - 1)
+  Y_lag <- Y[1:(T - 1), ]
+  X <- cbind(intercept, Y_lag)  # (T-1) × (1 + k)
+  
+  #OLS B_hat = (X'X)^(-1) X'Y
+  B_hat <- solve(t(X) %*% X) %*% t(X) %*% Y_response
+  
+  #residual
+  E_hat <- Y_response - X %*% B_hat
+  
+  # 
+  Sigma_hat <- t(E_hat) %*% E_hat / (T - 1 - (1 + k))
+  
+  # 
+  list(
+    intercept = B_hat[1, ],
+    A1 = B_hat[-1, ],  #100 × 100 coefficient matrix
+    residuals = E_hat,
+    Sigma = Sigma_hat
+  )
+}
+# store the VAR coefficient of each subject
+var_coef_list <- list()
+coef_matrix1 <- list()
+for (i in 1:90) {
+  # extract the i-th matrix of subject
+  mat_100_T <- subj.fmri[[i]]
+  
+  ts_matrix <- t(mat_100_T)  # transpose 100*T--->T*100
+  colnames(ts_matrix) <- paste0("V", 1:ncol(ts_matrix))
+  # fit VAR(1) model
+  coef_vector <- tryCatch({
+    var_model <-fit_var1(ts_matrix)
+    coef_matrix <- var_model$A1
+    coef_matrix1[[i]] <- coef_matrix
+    as.vector(coef_matrix)  # flatten
+  }, error = function(e) {
+    rep(NA, 100 * 100 + 100)  
+  })
+  
+  var_coef_list[[i]] <- coef_vector
+}
+
+# combined ----90*
+var_matrix <- do.call(rbind, var_coef_list)
+
+# check the dimension
+dim(var_matrix)
+```
+
+Now, for each subject, we have a $100 \times 100$ matrix, where $a_{ij}$ represents the influence of region $j$ at the previous time point on the current value of region $i$.
+
+The VAR coefficients between brain regions are generally small. Due to the high similarity in the connectivity structure of brain networks across individuals, the resulting  VAR coefficient matrices tend to be very similar between subjects. Since the core of PCA lies in identifying directions with the greatest variance, this similarity makes it difficult for PCA to capture any prominent principal component directions.
+
+
+### Reduced
+
+We compute the L2 norm of each matrix along both rows and columns, i.e., for a matrix $A = [a_{ij}]$, we compute $\|A_{i\cdot}\|_2$ and $\|A_{\cdot j}\|_2$ for all $i$ and $j$.
+- **Row-wise norm**: measures the total strength by which a brain region is **influenced by all other regions** at the current time point.  
+  → Reflects the sensitivity of the region as a **receiver**.signed as In
+
+- **Column-wise norm**: measures the total influence a brain region exerts **on all other regions** at the previous time point.  
+  → Reflects the influence ability of the region as a **sender**. signed as OUT
+
+```{r}
+extract_row_col_norms <- function(mat) {
+  row_norms <- apply(mat, 1, function(x) sqrt(sum(x^2)))  # L2 norms per row
+  col_norms <- apply(mat, 2, function(x) sqrt(sum(x^2)))  # L2 norms per cloumn
+  return(c(row_norms, col_norms))  # 1*200
+}
+
+norm_features <- t(sapply(coef_matrix1, extract_row_col_norms))  # 90 x 200
+
+# set colunms names
+roi_labels <- paste0("ROI", 1:100)
+
+colnames(norm_features) <- c(paste0("In_", roi_labels), paste0("Out_", roi_labels))
+#check the result
+pc_VAR_coef<- prcomp(norm_features)
+variance_explained <- pc_VAR_coef$sdev^2 / sum(pc_VAR_coef$sdev^2) * 100  # Percentage
+
+cumulative_variance <- cumsum(variance_explained)
+```
+
+```{r echo=FALSE}
+# Output variance explained
+
+cat("Variance explained by first 10 PCs (%):\n", round(variance_explained[1:10], 2))
+cat("\n")
+cat("\nCumulative variance explained by first 10 PCs (%):\n", round(cumulative_variance[1:10], 2))
+```
+
+```{r}
+#PCA
+
+plot(pc_VAR_coef$x[,1], pc_VAR_coef$x[,2],
+
+     xlab = "PC1 Scores", ylab = "PC2 Scores",
+
+     main = "Projection of Subjects on PC1 vs PC2",
+
+     pch = 16, col = "red")
+
+# Build data frame with PCA scores + age + gender
+n_pc <- 10
+
+#extract PC1 to PC10
+df_pca <- as.data.frame(
+  sapply(1:n_pc, function(i) pc_VAR_coef$x[, i])
+)
+
+colnames(df_pca) <- paste0("PC", 1:n_pc)
+
+# add gender and age
+df_pca$age <- as.factor(subj.x$age)
+df_pca$gender <- as.factor(subj.x$gender)
+
+
+# Plot pairwise scatterplots (with color by age, shape by gender)
+
+ggpairs(
+
+  df_pca,
+
+  columns = 1:10,  # PC1 to PC10
+
+  mapping = aes(color = age, shape = gender),
+
+  upper = list(continuous = wrap("points", alpha = 0.7, size = 2)),
+
+  lower = list(continuous = wrap("points", alpha = 0.7, size = 2)),
+
+  diag = list(continuous = wrap("densityDiag", alpha = 0.4))
+
+) +
+
+  theme_minimal()
+#
+
+```
+
+# 4. Clustering
+
+Clustering cannot be applied directly to the raw dataset, due to the variable shape, its high dimensionality, and lack of temporal alignment.
+
+## 4.1 Using correlation matrix
+
+To explore potential subgroups of subjects based on their functional connectivity, we used correlation-based features to apply several clustering techniques. 
+
+We performed clustering on the top six principal components derived from the 90 × 100 subject-ROI connectivity matrix.
+
+These components captured over 90% of the variance in the original data and allows direct visualization and interpretation in the PC1–PC2 space.
+
+### 4.1.1  Clustering on subjects
+
+#### K-means
+```{r}
+
+# Elbow method on PCA-reduced data
+wss <- sapply(1:10, function(k){
+  kmeans(df_pca_corr[, 1:6], centers = k, nstart = 20)$tot.withinss
+})
+
+plot(1:10, wss, type = "b", pch = 19,
+     xlab = "Number of Clusters", ylab = "Within-cluster SS",
+     main = "Elbow Method on PCA (Correlation Features)")
+
+
+kmeans_full <- kmeans(normalized_features, centers = 2)
+
+df_pca_corr["kmeans_full"] = as.factor(kmeans_full$cluster)
+
+kmeans_6pc_2centers <-  kmeans(df_pca_corr[,1:6], 2)
+
+df_pca_corr["kmeans_6pc_2centers"] = as.factor(kmeans_6pc_2centers$cluster)
+
+kmeans_6pc_3centers <-  kmeans(df_pca_corr[,1:2], 3)
+
+df_pca_corr["kmeans_6pc_3centers"] = as.factor(kmeans_6pc_3centers$cluster)
+```
+
+The elbow plot suggest K = 2 or K= 3
+
+::: {.panel-tabset}
+### PCA reduced data K = 2, gender
+
+```{r}
+
+g = ggplot(df_pca_corr, aes(x=PC1, y=PC2, color=kmeans_6pc_2centers, shape = gender)) +
+geom_point(size=3) +
+ggtitle("Projection of Subjects on PC1 vs PC2")+
+theme_minimal()
+
+print(g)
+
+
+```
+### PCA reduced data K = 2, age
+```{r}
+
+g = ggplot(df_pca_corr, aes(x=PC1, y=PC2, color=kmeans_6pc_2centers, shape = age)) +
+geom_point(size=3) +
+ggtitle("Projection of Subjects on PC1 vs PC2")+
+theme_minimal()
+
+print(g)
+
+
+```
+### PCA reduced data K = 3, Gender
+
+```{r}
+g = ggplot(df_pca_corr, aes(x=PC1, y=PC2, color=kmeans_6pc_3centers, shape = gender)) +
+
+geom_point(size=3) +
+ggtitle("Projection of Subjects on PC1 vs PC2")+
+theme_minimal()
+
+print(g)
+```
+### PCA reduced data K = 3, age
+```{r}
+g = ggplot(df_pca_corr, aes(x=PC1, y=PC2, color=kmeans_6pc_3centers, shape = age)) +
+
+geom_point(size=3) +
+ggtitle("Projection of Subjects on PC1 vs PC2")+
+theme_minimal()
+
+print(g)
+```
+:::
+
+The clustering using k-means do not show any clear differences between the individuals in the clusters.
+
+#### Hierarchical Clustering 
+
+```{r}
+# Hierarchical clustering
+d <- dist(df_pca_corr[, 1:6])  # or full data
+hc_subjects <- hclust(d, method = "ward.D2")
+plot(hc_subjects, main = "Hierarchical Clustering of Subjects")
+
+df_pca_corr$hclust_3 <- as.factor(cutree(hc_subjects, k = 3))
+
+```
+The hierachical clustering suggest 3 clusters.
+
+```{r}
+
+ggplot(df_pca_corr, aes(x = PC1, y = PC2, color = hclust_3, shape = age)) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(title = "Hierarchical Clustering (k = 3) in PCA Space")
+
+```
+No clear pattern is exhibited by the age categories contained in the clusters.
+
+### 4.1.2 Clustering on ROIs
+
+To use clustering on ROIs, we will use the mean activation matrix (90x100) and transpose it. When applying PCA on this transposed matrix, the number of PCs sufficient to explain 80% of the variance was above 20, so we decided to cluster on the 100x90 matrix
+
+#### K-means 
+```{r}
+# 1. ROI data matrix (each row = one ROI, each column = subject or feature)
+roi_data <- t(normalized_features)  # 100 x 90 for example
+
+wss <- sapply(1:10, function(k){
+  kmeans(roi_data, centers = k, nstart = 20)$tot.withinss
+})
+
+plot(1:10, wss, type = "b", pch = 19,
+     xlab = "Number of Clusters", ylab = "Within-cluster SS",
+     main = "Elbow Method on PCA (Correlation Features)")
+
+
+# 2. K-means clustering
+kmeans_roi <- kmeans(roi_data, centers = 3, nstart = 25)
+roi_clusters_kmeans <- kmeans_roi$cluster
+
+```
+According to the elbow plot, we should choose k = 3.
+We will compare the results with the hierarchical clstering below. 
+
+#### Herarchical  
+
+We will now consider the ROIs as the statistical unit to cluster.
+
+```{r}
+
+# Compute Euclidean distance between ROIs based on subject-wise profiles
+
+d <- dist(roi_data)
+
+# Hierarchical clustering on ROI profiles
+
+hc <- hclust(d, method = "ward.D2")
+
+roi_clusters_hclust <- cutree(hc, k = 3)
+# Plot dendrogram to visualize clusters
+
+plot(hc, main = "ROI Clustering Across Subjects")
+
+```
+
+This approach suggests 3 clusters.
+
+:::{.panel-tabset}
+
+### K-means Clustering (K = 3)
+
+```{r}
+brain_plot(roi_clusters_kmeans, roi.names, "ROI Clustering (K-means)")
+```
+### Hierarchical Clustering (K = 3)
+
+```{r}
+brain_plot(roi_clusters_hclust, roi.names, "ROI Clustering (Hierarchical)")
+```
+
+:::
+
+ROI clustering using both K-means and hierarchical clustering revealed three major functional clusters. As seen in the brainplots, Cluster 1 appears broadly distributed, while Clusters 2 and 3 show more localized patterns in specific regions, possibly corresponding to distinct functional networks.
+
+
+## 4.2 Clustering based on VAR approach
+
+#### 4.2.1 cluster on subject
+```{r}
+wss <- sapply(1:10, function(k){
+  kmeans(norm_features, centers = k, nstart = 10)$tot.withinss
+})
+
+plot(1:10, wss, type = "b", pch = 19,
+     xlab = "Number of Clusters K", ylab = "Total Within-Cluster Sum of Squares",
+     main = "Elbow Method for Optimal K")
+
+```
+we decide to select k=2
+
+
+```{r}
+kmeans_result <- kmeans(norm_features, centers = 2, nstart = 25)
+cluster_labels <- kmeans_result$cluster
+pca_df_var <- data.frame(PC1 = pc_VAR_coef$x[,1], PC2 = pc_VAR_coef$x[,2],
+                     Cluster = as.factor(cluster_labels))
+
+ggplot(pca_df_var, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "Clustering Subjects Based on Out/In Influence Norms (PCA View)")
+```
+
+
+```{r}
+#Compute the mean of features grouped by cluster labels
+cluster_means <- aggregate(norm_features, by = list(Cluster = cluster_labels), FUN = mean)
+# split the data to IN and OUT
+in_mat <- cluster_means[, grepl("^In_ROI", names(cluster_means))]
+out_mat <- cluster_means[, grepl("^Out_ROI", names(cluster_means))]
+
+# 
+colnames(in_mat) <- roi.names
+colnames(out_mat) <- roi.names
+```
+
+```{r}
+# Most affected ROI (top 5 per category)
+top_in <- apply(in_mat, 1, function(row) {
+  roi.names[order(row, decreasing = TRUE)[1:5]]
+})
+
+# The most influential ROI (Out）
+top_out <- apply(out_mat, 1, function(row) {
+  roi.names[order(row, decreasing = TRUE)[1:5]]
+})
+
+for (i in 1:nrow(in_mat)) {
+  cat("\nCluster", i, "\n")
+  cat("Top 5 Inward-Influenced ROIs:\n", paste(top_in[, i], collapse = ", "), "\n")
+  cat("Top 5 Outward-Influencing ROIs:\n", paste(top_out[, i], collapse = ", "), "\n")}
+```
+
+In Cluster 1, the most strongly influenced brain regions are primarily from the visual network, while the most influential regions mainly belong to the **default mode network (DMN)** and the control network. This pattern may suggest that participants in this cluster were engaged in tasks closely related to visual processing.
+
+
+In Cluster 2, the most strongly influenced brain regions include areas from the default mode network, visual network, and parts of the control network, while the most influential regions are primarily located in the visual network, salience/ventral attention network, and dorsal attention network. This pattern suggests that participants in this cluster may have been engaged in tasks that involve coordinated engagement of multiple brain networks, such as reading, language processing, or contextual comprehension.
+
+
+#### 4.2.2 cluster on ROI
+
+Now based on VAR approach, our data structure is $90*100*100$,Now we want to combine data from a single ROI across all subjects.
+For each ROI ,we will obtain a matrix of size $90*100$.For example, ROI1 can be written as :
+
+$$
+\begin{bmatrix}
+\text{ROI1}_(11) & \text{ROI1}_1(12) & \cdots & \text{ROI1}_1(1\ 100) \\
+\text{ROI1}_2(11) & \text{ROI1}_2(12) & \cdots & \text{ROI1}_2(1\ 100) \\
+\vdots & \vdots & \ddots & \vdots \\
+\text{ROI1}_{90}(11) & \text{ROI1}_{90
+}(12) & \cdots & \text{ROI1}_{90}(1\ 100)
+\end{bmatrix}
+$$
+
+
+```{r}
+roi_list <- vector("list", length = 100)
+
+for (i in 1:100) {
+  row_list <- lapply(coef_matrix1, function(mat) {
+    mat[i, 1:100, drop = FALSE]  
+  })
+  roi_list[[i]] <- do.call(rbind, row_list)
+}
+dim(roi_list[[1]])
+```
+
+
+```{r}
+roi_feature_matrix <- t(sapply(roi_list, function(mat) colMeans(mat)))
+
+wss <- sapply(1:10, function(k){
+  kmeans(roi_feature_matrix, centers = k, nstart = 10)$tot.withinss
+})
+
+plot(1:10, wss, type = "b", pch = 19,
+     xlab = "Number of Clusters K", ylab = "Total Within-Cluster Sum of Squares",
+     main = "Elbow Method for Optimal K")
+```
+
+Although the elbow plot does not provide a clear indication of the optimal value of $K$, we tested several values ($K = 3, 4, 5, 6, \dots$) and found that the clustering was most distinct when $K = 3$. Therefore, we present only the results for $K = 3$ and $K = 4$ in this section.
+
+::: {.panel-tabset}
+
+### K=3
+```{r}
+#k-means method
+kmeans_result <- kmeans(roi_feature_matrix, centers = 3)
+pca_result_var <- prcomp(roi_feature_matrix)
+
+df_pca_var <- data.frame(
+  PC1 = pca_result_var$x[, 1],
+  PC2 = pca_result_var$x[, 2],
+  Cluster = factor(kmeans_result$cluster)
+)
+
+ggplot(df_pca_var, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(title = "K-means Clustering of ROIs Projected on PCA Space (K=3)",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+```
+### K=4
+```{r}
+#k-means method k=4
+kmeans_result4 <- kmeans(roi_feature_matrix, centers = 4)
+pca_result_var <- prcomp(roi_feature_matrix)
+
+df_pca_var <- data.frame(
+  PC1 = pca_result_var$x[, 1],
+  PC2 = pca_result_var$x[, 2],
+  Cluster = factor(kmeans_result4$cluster)
+)
+
+ggplot(df_pca_var, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(title = "K-means Clustering of ROIs Projected on PCA Space (K=4)",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+```
+
+:::
+
+We display the brain region names associated with each cluster based on K=3.
+
+
+
+```{r}
+roi_clusters <- kmeans_result$cluster
+table(roi_clusters)
+clustered_rois <- split(roi.names, roi_clusters)
+print(clustered_rois)
+```
+
+In Cluster 1, the dominant networks are the visual, attention, and somatomotor networks, with overall functional characteristics oriented toward external perception and stimulus-driven responses.
+
+In Cluster 2, the dominant networks are DMN and control network.This cluster is more related to internal cognitive processing, contextual construction.
+
+In Cluster 3, the dominant networks are the somatomotor network and  both the ventral and dorsal attention networks. This cluster is more involved in motor execution and behavioral control.
+
+# 5. Advanced Statistical Analysis
+
+## 5.1 CAPs Method
+
+Co-Activation Patterns (CAPs) are data-driven representations of transient whole-brain activity patterns at the single-volume level. Instead of focusing on long-term averaged connectivity, CAP analysis highlights the temporal heterogeneity in resting-state fMRI by identifying recurring activation states that reflect momentary neural configurations (Liu et al., 2013, 2018).
+
+In our analysis, we adopted a seed-based CAP framework centered on the posterior cingulate cortex (PCC), following protocols described in Liu et al. (2013) and Amico et al. (2014). The full CAP extraction procedure included:
+
+1. High-amplitude frame selection: We extracted the top 15% of BOLD signal time points based on PCC activity, which are known to reflect strong engagement of functional networks (Liu & Duyn, 2013).
+	
+1. Whole-brain pattern retrieval: At those time points, BOLD signals across all 100 ROIs were collected.
+	
+1. K-means clustering: We applied k-means to group these snapshots into recurring patterns (CAPs). Based on interpretability and consistency, we selected K = 7 as the optimal number, consistent with prior literature.
+	
+1. CAP quantification: Properties such as Temporal Fraction (TF), Frequency of Alternation (FA) and CAP Spatial Similarity were computed to characterize CAP dynamics (Chen et al., 2015).
+	
+1. Group comparisons: CAP-based features were linked to demographic factors (age, gender), and statistical testing, including permutation tests, was used to explore potential group differences.
+
+Importantly, CAPs offer complementary insights to traditional static connectivity or sliding-window dynamic FC. They help reveal temporally sparse but spatially organized states that are likely related to neural events (Liu et al., 2018) and potentially reflect brain state transitions, arousal modulation, or functional specialization (Liégeois et al., 2021).
+
+### Step 1-2 High-amplitude frame selection
+
+The posterior cingulate cortex (PCC) consists of the following ROIs:
+
+```{r}
+# PCC ROI name matching: Assuming you have the roi.names vector
+pcc_rois <- grep("pCunPCC", roi.names, value = FALSE)  # get the index of roi
+roi.names[pcc_rois]
+```
+
+In the code below we do the following:
+
+For each subject we compute the mean at each time across the ROIs constituting the posterior cingulate cortex (PCC) and standardize.
+
+Then for each subject we select the time points corresponding to the top 15% of the PCC activations.
+
+Finally, we row bind the time filtered data on all ROIs from all subjects getting a $\sum_{i=1}^{90}\tilde{T_i} \times p$ matrix, where the $\tilde{T_i}$ corresponds to the number of time points selected for subject $i$ and $p=100$ is the number of ROIs.
+
+
+```{r}
+# Store each high response data and time information
+pcc_high_response_data <- list()
+pcc_selected_time_info <- list()
+
+for (i in 1:90) {
+  subject_data <- t(subj.fmri[[i]])  # time × ROI
+  
+  # extract pcc signal
+  pcc_signal <- rowMeans(subject_data[, pcc_rois, drop = FALSE])  # time x 1
+
+  # scale（z-score）
+  pcc_z <- scale(pcc_signal)
+
+  # select top 15% time points
+  top_15_percent_idx <- order(pcc_z, decreasing = TRUE)[1:floor(0.15 * length(pcc_z))]
+
+  # Select the whole brain map (all ROIs) at these moments
+  pcc_high_response_data[[i]] <- subject_data[top_15_percent_idx, ]
+
+  # Save time information
+  pcc_selected_time_info[[i]] <- data.frame(Subject = i, TimeIndex = top_15_percent_idx)
+}
+
+# Combine all subjects
+final_pcc_high_response_data <- do.call(rbind, pcc_high_response_data)
+final_pcc_selected_time_info <- do.call(rbind, pcc_selected_time_info)
+```
+
+
+As an illustration, below we show a plot of the PCC signal for subject 1 and the top 15% activations
+
+
+```{r}
+i <- 1  
+pcc_signal <- rowMeans(t(subj.fmri[[i]])[, pcc_rois])
+pcc_z <- scale(pcc_signal)
+selected_idx <- final_pcc_selected_time_info$TimeIndex[final_pcc_selected_time_info$Subject == i]
+
+plot(pcc_z, type = "l", col = "gray", lwd = 1.5,
+     main = "PCC z-scored Signal with High Activation Points(Subject 1)",
+     xlab = "Time", ylab = "Z-score")
+points(selected_idx, pcc_z[selected_idx], col = "red", pch = 19)
+```
+
+
+### Step 3: K-means clustering to get CAPS
+
+To determine the number of clusters (K) for the k-means CAP analysis, we referred to previous studies applying CAP methodology, notably Amico et al. (2014) and Liu et al. (2013). In these works, K = 8 was used to characterize PCC-based CAPs across different consciousness states and resting conditions. This number was found sufficient to capture functionally distinct co-activation patterns while maintaining spatial interpretability.
+
+In our study, we explored a range of K values (from 6 to 10) and evaluated the resulting CAPs in terms of functional diversity and interpretability. We found that K = 7 provided the most robust and meaningful CAP decomposition. Specifically:
+
+- The 7 CAPs captured distinct patterns related to known brain networks (e.g., DMN, limbic, visual, sensorimotor, DAN, control networks).
+	
+-	When increasing K beyond 7, the new CAPs appeared to be subdivisions of existing ones, such as fine variations within DMN- or globally activated states, rather than revealing new functional modes.
+	
+-	This phenomenon is consistent with the findings from Amico et al. (2014), who observed that core CAP structures tend to be preserved across conditions, and that excessive clustering may capture noise or minor fluctuations rather than meaningful states.
+
+Thus, we selected K = 7 as the optimal balance point: it allows sufficient granularity for identifying brain states while avoiding overfitting or redundancy. This choice is also in line with a large body of CAP-related studies using K between 6 and 8 (e.g., Liu et al., 2013; Chen et al., 2020; Paakki et al., 2021).
+
+```{r}
+set.seed(123)
+# choose K
+K <- 7
+
+# run K-means on high response data
+caps_kmeans <- kmeans(final_pcc_high_response_data, centers = K, nstart = 100, iter.max = 3000)
+
+# get caps
+caps_centers <- caps_kmeans$centers  
+
+# add caps label to dataset
+final_pcc_selected_time_info$CAP <- caps_kmeans$cluster
+
+# see result
+# head(final_pcc_selected_time_info)
+```
+
+
+#### Brain Plots
+
+Below we show the brain plots corresponding to the centers of each CAP. 
+
+
+::: {.panel-tabset}
+
+##### CAPS 1
+
+```{r}
+brain_plot(caps_centers[1,])
+```
+
+##### CAPS 2
+
+```{r}
+brain_plot(caps_centers[2,])
+```
+
+##### CAPS 3
+
+```{r}
+brain_plot(caps_centers[3,])
+```
+
+##### CAPS 4
+
+```{r}
+brain_plot(caps_centers[4,])
+```
+
+##### CAPS 5
+
+```{r}
+brain_plot(caps_centers[5,])
+```
+
+##### CAPS 6
+
+```{r}
+brain_plot(caps_centers[6,])
+```
+
+##### CAPS 7
+
+```{r}
+brain_plot(caps_centers[7,])
+```
+
+:::
+
+
+
+#### Functional Network Activation per CAP
+
+
+Each CAP is represented as a spatial map of activation across 100 ROIs (Schaefer100 atlas).
+
+These ROIs are grouped into 7 canonical brain networks:
+	
+- Control (Executive)
+	
+-	Dorsal Attention (DAN)
+	
+-	Default Mode Network (DMN)
+	
+-	Limbic
+	
+-	Somatomotor
+	
+-	Ventral Attention / Salience (VAN)
+	
+-	Visual
+
+For each CAP, we computed the mean Z-scored activation within each network by averaging over the ROIs assigned to that network.
+
+
+```{r}
+
+# Extract feature network labels
+roi_network <- sub("7Networks_[LR]H_([A-Za-z]+).*", "\\1", roi.names)
+roi_network <- gsub("SalVentAttn", "VAN_Salience", roi_network)
+roi_network <- gsub("DorsAttn", "DAN", roi_network)
+roi_network <- gsub("SomMot", "Somatomotor", roi_network)
+roi_network <- gsub("Cont", "Control", roi_network)
+roi_network <- gsub("Default", "DMN", roi_network)
+roi_network <- gsub("Vis", "Visual", roi_network)
+roi_network <- gsub("Limbic", "Limbic", roi_network)
+
+# Convert to data frame
+caps_df <- as.data.frame(caps_centers)
+caps_df$CAP <- paste0("CAP", 1:nrow(caps_df))
+
+# Reshape into long format: each row is the activation value of a ROI in a certain CAP
+library(tidyr)
+caps_long <- pivot_longer(caps_df, -CAP, names_to = "ROI_Index", values_to = "Activation")
+caps_long$ROI_Index <- as.integer(gsub("V", "", caps_long$ROI_Index))  # V1 → 1
+
+# Add functional network tags
+caps_long$Network <- roi_network[caps_long$ROI_Index]
+
+# Calculate the average activation of each CAP on each network
+library(dplyr)
+network_summary <- caps_long %>%
+  group_by(CAP, Network) %>%
+  summarise(mean_activation = mean(Activation), .groups = "drop")
+library(ggplot2)
+
+ggplot(network_summary, aes(x = Network, y = mean_activation, fill = Network)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~CAP, scales = "free_y") +
+  labs(title = "Functional Network Activation per CAP",
+       y = "Mean Activation (Z)", x = "Functional Network") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+The bar plots above show the mean activation level (Z-score) of each brain network for the 7 CAPs. These profiles reveal distinct activation signatures that can be linked to known cognitive and neural processes:
+
+ **CAP1:DMN and Limbic Dominance**  
+ 
+- DMN and Limbic have higher activations, other networks (Control, DAN, Visual, Somatomotor, VAN/Salience) show comparatively lower activations.  
+   
+   
+ **CAP2: Subtle Variants of DMN-Dominant States**
+ 
+- Still shows strong DMN activity, though the overall pattern may present slight shifts—possibly with moderately lower activation in other networks compared to CAP1.
+  
+- The balance between the DMN and other networks (perhaps a bit more moderate activity in the Control network) distinguishes it from CAP1.
+  
+
+  
+ **CAP3: Global Co-Activation Burst**
+ 
+- CAP3 can be seen as a global co-activation state—a transient burst where the brain’s various systems are synchronously active.
+
+  
+ **CAP4: Suppression of Attention and Motor Networks**
+  
+- Notably, the DAN (dorsal attention) and Somatomotor networks show negative or suppressed scores. Other networks, like DMN and Control, might hover around baseline or show only modest activation.
+  
+ 
+ **CAP5: Visual-Dominant State**
+ 
+- Marked by high positive activation in the Visual network, while other networks (such as Somatomotor, DAN, or Control) are less engaged. The DMN may show moderate activity, but the visual system clearly stands out.
+ 
+ 
+ **CAP6: Externally Focused, Sensorimotor-Attention Engagement**
+ 
+- Shows elevated signals in Visual, Somatomotor, and DAN networks. In contrast, the DMN and possibly the Control network are less active, suggesting a shift away from internal processing.
+ 
+ 
+ **CAP7: High Engagement with Emphasis on Control and Attention**
+ 
+- Like CAP3, CAP7 shows globally high activations but with even greater emphasis on the Control and DAN networks.
+ 
+- All networks are highly activated, but the weighted contribution of executive and attentional systems is notably more pronounced.
+
+
+### Step 4-5:  
+
+
+#### Temporal Fraction per CAP
+
+
+```{r}
+# For raw CAPs (no PCA)
+tf_raw <- final_pcc_selected_time_info %>%
+  group_by(Subject, CAP) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(Subject) %>%
+  mutate(TF = count / sum(count)) %>%
+  ungroup()
+
+# Optional: visualize
+library(ggplot2)
+ggplot(tf_raw, aes(x = factor(CAP), y = TF, fill = factor(CAP))) +
+  geom_boxplot() +
+  labs(title = "Temporal Fraction per CAP (raw space)",
+       x = "CAP", y = "Temporal Fraction") +
+  theme_minimal()
+
+
+# Raw CAPs
+tf_matrix_raw <- final_pcc_selected_time_info %>%
+  group_by(Subject, CAP) %>%
+  summarise(freq = n(), .groups = "drop") %>%
+  group_by(Subject) %>%
+  mutate(freq = freq / sum(freq)) %>%
+  pivot_wider(names_from = Subject, values_from = freq, values_fill = 0) %>%
+  column_to_rownames("CAP") %>%
+  as.matrix()
+
+# Heatmap
+# heatmap(tf_matrix_raw, main = "CAP Frequency Matrix (Raw CAPs)",
+#          scale = "none",col = heat.colors(100), margins = c(3, 10))  
+
+# Generate an improved heatmap
+pheatmap(tf_matrix_raw,
+         main = "CAP Frequency Matrix",
+         color = colorRampPalette(c("white", "steelblue"))(100),
+         cluster_rows = TRUE,      
+         cluster_cols = TRUE,      
+         display_numbers = FALSE,   
+         number_color = "black",   
+         #fontsize_number = 8,      
+         angle_col = 45,           
+         border_color = "grey60",  
+         fontsize = 10,            
+         cellwidth = 10,           
+         cellheight = 20,          
+         legend_breaks = seq(0, 1, by = 0.1),   
+         legend_labels = seq(0, 1, by = 0.1)
+)
+
+
+```
+
+This boxplot shows how frequently each CAP (1–7) appears across subjects during resting-state fMRI. CAP3 and CAP1 have higher median temporal fractions, suggesting they represent more dominant or common brain states. CAP7 shows the lowest overall occurrence. The variability across subjects reflects individual differences in brain dynamics.
+
+We indicated at the beginning of the report that the collected fMRI data is most likely stationary. The frequency matrix seems to confirm this given that none of the CAPs are more frequent than any of the others.
+
+##### Demographics
+
+```{r}
+# Reshape TF matrix to long format: one row per (CAP, Subject)
+tf_long <- as.data.frame(tf_matrix_raw) %>%
+  tibble::rownames_to_column("CAP") %>%
+  pivot_longer(-CAP, names_to = "Subject", values_to = "TF") %>%
+  mutate(Subject = as.integer(Subject))
+
+# Merge with subj.x
+subj.x <- subj.x %>% mutate(Subject = 1:n())
+tf_demo <- left_join(tf_long, subj.x, by = "Subject")
+
+
+ggplot(tf_demo, aes(x = gender, y = TF, fill = gender)) +
+  geom_boxplot() +
+  facet_wrap(~CAP, ncol = 3) +
+  labs(title = "CAP Temporal Fraction by Gender",
+       x = "Gender", y = "Temporal Fraction") +
+  theme_minimal()
+
+
+ggplot(tf_demo, aes(x = age, y = TF, fill = age)) +
+  geom_boxplot() +
+  facet_wrap(~CAP, ncol = 3) +
+  labs(title = "CAP Temporal Fraction by Age Group",
+       x = "Age Group", y = "Temporal Fraction") +
+  theme_minimal()
+```
+
+This figure shows the distribution of temporal fractions of each CAP (1–7) for male and female participants. Overall, the CAP usage patterns appear relatively balanced across genders. However, CAP3 shows a slightly higher median TF in males, suggesting possible gender-related differences in brain state dynamics during rest.
+
+This plot compares temporal fractions across age groups (22–25, 26–30, 31–35, 36+). Some CAPs (e.g., CAP4 and CAP7) show slight variations across age. For example, CAP4 tends to increase in the 26–30 group, and CAP7 is least used in the oldest group (36+). This may suggest age-related modulation of certain brain states during resting-state fMRI.
+
+
+```{r}
+ggplot(tf_demo, aes(x = age, y = TF, fill = gender)) +
+  geom_boxplot(position = position_dodge()) +
+  facet_wrap(~CAP, scales = "free_y") +
+  labs(title = "CAP Temporal Fraction by Age and Gender",
+       x = "Age Group", y = "Temporal Fraction") +
+  theme_minimal()
+
+
+```
+
+
+This plot presents how the temporal fraction (TF) of each CAP (1–7) varies across different age groups and genders. Each subplot corresponds to one CAP, showing boxplots by age (x-axis) and gender (color: red = female, blue = male).
+
+**Key insights:**
+
+  -CAP3: Higher TFs are observed in males, especially in age groups 22–25 and 31–35, suggesting potential gender specificity of this resting-state pattern.
+  
+  -CAP5: Females aged 31–35 show elevated TFs, possibly indicating more frequent activation of this CAP in that group.
+
+Conclusion:
+
+The figure supports that CAP dynamics during resting-state fMRI are jointly influenced by age and gender. Certain CAPs may exhibit interaction effects, indicating individual variability in how brain states are engaged across lifespan and between sexes.
+
+##### Permutation test
+
+```{r}
+perm_test <- function(data, dep_var, group_var, n_perm = 10000,
+                      statistic = function(x, y) { mean(x) - mean(y) }) {
+  
+  # Extract grouping vector and check group levels
+  groups <- data[[group_var]]
+  unique_groups <- unique(groups)
+  if (length(unique_groups) != 2) {
+    stop("Grouping variable must have exactly two levels!")
+  }
+  
+  # For reproducibility
+  group_levels <- sort(unique_groups)
+  
+  # Extract dependent variable values
+  values <- data[[dep_var]]
+  
+  # Compute the observed statistic
+  obs_stat <- statistic(values[groups == group_levels[1]],
+                        values[groups == group_levels[2]])
+  
+  # Initialize vector to store permutation statistics
+  perm_stats <- numeric(n_perm)
+  for (i in 1:n_perm) {
+    # Randomly shuffle the group labels
+    shuffled_groups <- sample(groups)
+    perm_stats[i] <- statistic(values[shuffled_groups == group_levels[1]],
+                               values[shuffled_groups == group_levels[2]])
+  }
+  
+  # Compute two-sided p-value
+  p_val <- mean(abs(perm_stats) >= abs(obs_stat))
+  
+  return(list(observed = obs_stat, p_value = p_val, perm_stats = perm_stats))
+}
+```
+
+
+```{r}
+# For gender:
+perm_results_gender <- tf_demo %>%
+  group_by(CAP) %>%
+  group_modify(~ {
+    res <- perm_test(.x, dep_var = "TF", group_var = "gender", n_perm = 10000)
+    tibble(p_value = res$p_value)
+  })
+
+# Display CAPs with p-value < 0.05, sorted by p-value
+perm_results_gender %>%
+  filter(p_value < 0.05) %>%
+  arrange(p_value)
+
+tf_demo <- tf_demo %>%
+  mutate(age_group2 = ifelse(age %in% c("22-25", "26-30"), "young", "old"))
+
+
+perm_results_age <- tf_demo %>%
+  group_by(CAP) %>%
+  group_modify(~ {
+    res <- perm_test(.x, dep_var = "TF", group_var = "age_group2", n_perm = 10000)
+    tibble(p_value = res$p_value)
+  })
+
+perm_results_age %>%
+  filter(p_value < 0.05) %>%
+  arrange(p_value)
+
+
+perm_results_gender_by_age <- tf_demo %>%
+  group_by(CAP, age_group2) %>%
+  group_modify(~ {
+    res <- perm_test(.x, dep_var = "TF", group_var = "gender", n_perm = 10000)
+    tibble(p_value = res$p_value)
+  }) %>%
+  ungroup() %>%
+  arrange(p_value)
+
+perm_results_gender_by_age %>%
+  filter(p_value < 0.05) %>%
+  arrange(p_value)
+
+```
+
+When examining CAP temporal fractions (TF) across gender, no significant group-level differences were observed when testing gender or age independently. However, a stratified permutation analysis revealed age-specific gender effects in three CAPs:
+
+  -CAP3 (older adults): p = 0.0271
+  
+	-CAP5 (older adults): p = 0.0327
+	
+	-CAP1 (older adults): p = 0.0496
+
+These results indicate that gender-related differences in CAP dynamics may emerge specifically in older individuals rather than across the full sample.
+
+  -CAP3 is associated with global co-activation, often linked to widespread integration or alertness. The significant gender difference in older adults may reflect sex-specific changes in arousal or large-scale network coordination with aging.
+  
+  -CAP5, marked by strong visual network activation, shows sex differences only in older adults—potentially pointing to age-related divergence in perceptual or imagery-related processing between males and females.
+  
+	-CAP1, dominated by the DMN and limbic networks, reflects introspective or emotionally tinged states. The gender divergence here may reflect differential emotional or self-referential processing styles with aging.
+
+Together, these findings suggest that age moderates the expression of gender differences in resting-state CAP profiles. Such effects may reflect combined influences of aging, hormonal changes, or lifestyle factors that impact brain dynamics differently in males and females.
+
+#### Frequency of Alternation
+
+```{r}
+
+# Compute FA per subject - raw CAPs
+fa_raw <- final_pcc_selected_time_info %>%
+  arrange(Subject, TimeIndex) %>%
+  group_by(Subject) %>%
+  summarise(
+    FA = sum(diff(CAP) != 0) / (n() - 1)
+  )
+
+# Optional: plot
+ggplot(fa_raw, aes(x = FA)) +
+  geom_histogram(fill = "steelblue", bins = 20) +
+  labs(title = "Frequency of Alternation",
+       x = "Switching Frequency", y = "Count") +
+  theme_minimal()
+
+
+```
+
+This histogram displays the distribution of Frequency of Alternation (FA) across all participants during resting-state fMRI. FA reflects how frequently a subject switches between CAP states over time.
+
+**Key insights:**
+
+  -Most subjects have FA values between 0.30 and 0.35, indicating moderate switching behavior during rest.
+  
+  -The distribution is slightly right-skewed, with some individuals showing relatively higher switching frequencies.
+  
+  -No extreme outliers are observed, suggesting a generally consistent dynamic range across subjects.
+
+
+##### Demographics
+
+```{r}
+
+# Ensure Subject column
+subj.x <- subj.x %>% mutate(Subject = 1:n())
+
+# Merge
+fa_data <- left_join(fa_raw, subj.x, by = "Subject")
+
+ggplot(fa_data, aes(x = gender, y = FA, fill = gender)) +
+  geom_boxplot() +
+  labs(title = "FA by Gender", x = "Gender", y = "Frequency of Alternation") +
+  theme_minimal()
+
+ggplot(fa_data, aes(x = age, y = FA, fill = age)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.15, fill = "white") +
+  labs(title = "FA by Age Group", x = "Age", y = "FA") +
+  theme_minimal()
+```
+
+##### Permutation test
+
+```{r}
+
+
+result_FA_gender <- perm_test(fa_data, dep_var = "FA", group_var = "gender", n_perm = 10000)
+cat("FA ~ gender:\nObserved difference:", round(result_FA_gender$observed, 4), "\n")
+cat("Permutation test p-value:", round(result_FA_gender$p_value, 5), "\n")
+
+fa_data <- fa_data %>% mutate(age_group = ifelse(age %in% c("22-25", "26-30"), "young", "old"))
+
+result_FA_age <- perm_test(fa_data, dep_var = "FA", group_var = "age_group", n_perm = 10000)
+cat("FA ~ age_group:\nObserved difference:", round(result_FA_age$observed, 4), "\n")
+cat("Permutation test p-value:", round(result_FA_age$p_value, 5), "\n")
+```
+
+Visually, females show a higher and more dispersed distribution of FA compared to males. The median FA for females is slightly above that of males, suggesting more frequent state transitions during resting-state. And premutation test also shows females exhibit significantly higher switching frequency during rest, suggesting more flexible or dynamic brain state transitions.
+
+Although statistically non-significant, the plot suggests:
+  -FA peaks slightly in the 22–25 and 31–35 groups.
+  -The 26–30 group shows wider variability, indicating greater individual differences.
+  
+Although not significantly different, the trends in the graphs are noteworthy, particularly the potential decline in the oldest group.
+
+#### CAP Spatial Similarity (Cosine similarity)
+
+```{r}
+# Cosine similarity function
+cosine_similarity <- function(x, y) {
+  sum(x * y) / (sqrt(sum(x^2)) * sqrt(sum(y^2)))
+}
+
+# Compute for raw CAPs
+K_raw <- nrow(caps_centers)
+sim_mat_raw <- matrix(NA, nrow = K_raw, ncol = K_raw)
+for (i in 1:K_raw) {
+  for (j in 1:K_raw) {
+    sim_mat_raw[i, j] <- cosine_similarity(caps_centers[i, ], caps_centers[j, ])
+  }
+}
+
+# Set row and column names for clarity
+rownames(sim_mat_raw) <- colnames(sim_mat_raw) <- paste0("CAP", 1:nrow(sim_mat_raw))
+# rownames(sim_mat_pca) <- colnames(sim_mat_pca) <- paste0("CAP", 1:nrow(sim_mat_pca))
+
+# Visualize with pheatmap + labels
+pheatmap(sim_mat_raw, main = "CAP Spatial Similarity",
+         cluster_rows = FALSE, cluster_cols = FALSE,
+         fontsize = 10)
+
+```
+
+This heatmap shows the pairwise spatial similarity between CAPs (1–7), with values typically computed via Pearson correlation. The color ranges from blue (negative correlation) to red (strong positive).
+  -The high similarity among CAP1/3/7 suggests they may reflect default-mode or visual-related states.
+  -CAP4’s spatial uniqueness may indicate a transient, deactivated, or switching-related state.
+  -The clustering of CAP5/6 implies a related functional network, possibly executive or salience-related.
+
+
+
+```{r}
+
+# PCA on similarity matrix (or dissimilarity)
+pca_res <- prcomp(sim_mat_raw, center = TRUE, scale. = TRUE)
+
+# Get PC scores (projection)
+pca_df <- data.frame(
+  CAP = rownames(sim_mat_raw),
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2]
+)
+
+# Plot
+ggplot(pca_df, aes(x = PC1, y = PC2, label = CAP)) +
+  geom_point(size = 3, color = "darkgreen") +
+  geom_text(vjust = -0.5, size = 5) +
+  labs(title = "PCA Projection of CAP Spatial Similarity",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+
+```
+
+By grouping CAPs based on spatial similarity and PCA topology, we can model resting-state brain activity as a staged dynamic process:
+
+  -Group A (CAP3/6/7): This group reflects transient high-arousal or globally engaged states. The brain appears to synchronize its networks either in preparation for external stimuli or during brief attention bursts.
+  
+  -Group B (CAP1/5): This group marks a transition between introspective and perceptual processing. The brain maintains internal focus while integrating visual/perceptual elements, possibly during imagery or mental simulation.
+  
+  -Group C (CAP2): CAP2 reflects a mild, cognitively relaxed internal mode—a subtler DMN state possibly tied to passive internal thoughts or brief mental wandering.
+  
+  -Group D (CAP4): CAP4 might reflect a low-vigilance or idling phase, a temporary disengagement from external or internal tasks, preparing for a functional reset.
+
+This view supports a trajectory-based model of brain state dynamics:
+CAP2 (Light Introspection)  
+   → CAP1 / CAP5 (Internal–External Transition)  
+      → CAP3 / CAP6 / CAP7 (High Engagement)  
+         → CAP4 (Disengagement or Reset)  
+            → CAP2 …
+Even at rest, the brain cycles through a series of distinct states—ranging from light introspection, perceptual transitions, and high engagement, to transient disengagement—reflecting dynamic tuning of cognitive and sensory readiness.
+
